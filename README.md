@@ -5,6 +5,7 @@ A simple, effective utility for Linux to lock your keyboard input while keeping 
 ## Use Cases
 
 *   **Cat Proofing:** Stop your cat from walking across your keyboard and sending unfinished emails, closing windows, or pausing your music.
+*   **Disable Laptop Keyboard:** If you are using another keyboard disable the internal laptop one to prevent accidental keypresses.
 *   **Child Safety:** Allow your toddler to watch videos or look at photos without worrying about them accidentally deleting files or stopping playback.
 *   **Cleaning:** Wipe down your keyboard without needing to shut down your computer or unplug the device.
 
@@ -23,6 +24,18 @@ A `PKGBUILD` is provided for easy installation on Arch Linux.
 
 ```bash
 makepkg -si
+```
+
+reload the udev rules after install
+
+``` bash
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=input --action=change 
+```
+
+If you aren't in the input group add your user
+
+```bash
+sudo usermod -aG input $USER
 ```
 
 ### Other Linux Distributions (Debian, Ubuntu, Fedora, etc.)
@@ -56,6 +69,12 @@ chmod +x install.sh
 ```
 
 This script will compile the application, install it to `/usr/local/bin`, and install a udev rule to allow running without root.
+
+If you aren't in the input group add your user
+
+```bash
+sudo usermod -aG input $USER
+```
 
 ## Usage
 

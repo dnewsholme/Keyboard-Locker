@@ -3,12 +3,17 @@ use evdev::{Device, Key};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use crossbeam_channel::{unbounded, Sender, Receiver};
+use std::path::PathBuf;
+use std::os::unix::io::AsRawFd;
 
 #[derive(PartialEq, Clone)]
 struct AppState {
     status: Status,
     unlock_key_code: u16, // The raw evdev code (Default 16 = KEY_Q)
     unlock_key_name: String,
+    devices: Vec<(String, PathBuf)>,
+    selected_device: Option<PathBuf>,
+    error_msg: Option<String>,
 }
 
 #[derive(PartialEq, Clone)]
@@ -16,48 +21,85 @@ enum Status { Idle, Locked }
 
 struct KeyLockApp {
     state: Arc<Mutex<AppState>>,
-    command_tx: Sender<bool>,
+    unlock_tx: Option<Sender<()>>,
 }
 
 impl KeyLockApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let (tx, rx) = unbounded::<bool>();
         let state = Arc::new(Mutex::new(AppState {
             status: Status::Idle,
             unlock_key_code: 16, // KEY_Q
             unlock_key_name: "Q".to_string(),
+            devices: Vec::new(),
+            selected_device: None,
+            error_msg: None,
         }));
 
         let thread_state = Arc::clone(&state);
+
         thread::spawn(move || {
-            keyboard_worker(rx, thread_state);
+            loop {
+                let devices = scan_devices();
+                {
+                    let mut s = thread_state.lock().unwrap();
+                    s.devices = devices;
+                    
+                    // Auto-select the first device if none is selected
+                    if s.selected_device.is_none() {
+                        if let Some(first) = s.devices.first() {
+                            s.selected_device = Some(first.1.clone());
+                        }
+                    }
+                    
+                    // If selected device is no longer present, deselect it
+                    if let Some(selected) = &s.selected_device {
+                        if !s.devices.iter().any(|(_, p)| p == selected) {
+                            s.selected_device = None;
+                        }
+                    }
+                }
+                thread::sleep(std::time::Duration::from_secs(2));
+            }
         });
 
-        Self { state, command_tx: tx }
+        Self { state, unlock_tx: None }
     }
 }
 
-fn keyboard_worker(rx: Receiver<bool>, state: Arc<Mutex<AppState>>) {
-    let mut device = loop {
-        if let Some(dev) = find_keyboard() { break dev; }
-        thread::sleep(std::time::Duration::from_secs(2));
+fn lock_worker(path: PathBuf, rx: Receiver<()>, state: Arc<Mutex<AppState>>) {
+    let mut device = match Device::open(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            state.lock().unwrap().error_msg = Some(format!("Failed to open device: {}", e));
+            return;
+        }
     };
 
-    let mut locked = false;
+    println!("Attempting to grab device: {}", device.name().unwrap_or("Unknown"));
+    if let Err(e) = device.grab() {
+        eprintln!("Failed to grab device: {}", e);
+        let mut s = state.lock().unwrap();
+        s.error_msg = Some(format!("Lock failed: {}", e));
+        s.status = Status::Idle;
+        return;
+    }
+    println!("Device grabbed successfully");
+
+    // Set non-blocking to allow polling rx and device
+    set_nonblocking(device.as_raw_fd());
+
     let mut ctrl_pressed = false;
 
     loop {
-        // 1. Check for UI commands
-        if let Ok(cmd) = rx.try_recv() {
-            locked = cmd;
-            if locked { let _ = device.grab(); } else { let _ = device.ungrab(); }
+        // Check for unlock signal from UI
+        if rx.try_recv().is_ok() {
+            break;
         }
 
-        if locked {
-            let mut should_unlock = false;
+        let mut should_unlock = false;
 
-            // Use a scoped block or collect events to free the borrow on 'device'
-            if let Ok(events) = device.fetch_events() {
+        match device.fetch_events() {
+            Ok(events) => {
                 for event in events {
                     if let evdev::InputEventKind::Key(key) = event.kind() {
                         let is_down = event.value() != 0;
@@ -68,37 +110,92 @@ fn keyboard_worker(rx: Receiver<bool>, state: Arc<Mutex<AppState>>) {
                         }
 
                         if key.code() == current_target && is_down && ctrl_pressed {
-                            should_unlock = true; 
-                            // We don't call ungrab here yet!
+                            should_unlock = true;
+                            break;
                         }
                     }
                 }
-            } // 'events' iterator is dropped here, freeing the borrow on 'device'
-
-            if should_unlock {
-                let _ = device.ungrab();
-                locked = false;
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {},
+            Err(e) => {
+                eprintln!("Error reading events: {}", e);
                 let mut s = state.lock().unwrap();
+                s.error_msg = Some(format!("Device disconnected: {}", e));
                 s.status = Status::Idle;
-            }
+                return;
+            },
         }
+
+        if should_unlock {
+            let _ = device.ungrab();
+            state.lock().unwrap().status = Status::Idle;
+            return;
+        }
+
         thread::sleep(std::time::Duration::from_millis(10));
     }
+
+    let _ = device.ungrab();
 }
 
-fn find_keyboard() -> Option<Device> {
-    evdev::enumerate().find(|(_, dev)| {
-        dev.supported_keys().map_or(false, |k| k.contains(Key::KEY_ENTER))
-    }).map(|(_, dev)| dev)
+fn scan_devices() -> Vec<(String, PathBuf)> {
+    let mut devices = Vec::new();
+    for (path, dev) in evdev::enumerate() {
+        if dev.supported_keys().map_or(false, |k| k.contains(Key::KEY_A)) {
+            let name = format!("{} ({})", dev.name().unwrap_or("Unknown"), path.display());
+            devices.push((name, path));
+        }
+    }
+    devices
+}
+
+fn set_nonblocking(fd: std::os::unix::io::RawFd) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
 }
 
 impl eframe::App for KeyLockApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut state = self.state.lock().unwrap();
+        
+        // Clean up unlock channel if worker finished on its own
+        if state.status == Status::Idle && self.unlock_tx.is_some() {
+            self.unlock_tx = None;
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Wayland Input Controller");
             ui.add_space(8.0);
+
+            if let Some(err) = &state.error_msg {
+                ui.colored_label(egui::Color32::RED, err);
+            }
+
+            if state.devices.is_empty() {
+                ui.add_space(10.0);
+                ui.colored_label(egui::Color32::YELLOW, "⚠ No keyboards detected!");
+                ui.label("Ensure you are in the 'input' group and have REBOOTED.");
+                ui.monospace(format!("sudo usermod -aG input {}", std::env::var("USER").unwrap_or("user".into())));
+            } else {
+                ui.label("Select Keyboard to Lock:");
+                let devices = state.devices.clone();
+                let selected_text = devices.iter()
+                    .find(|(_, p)| Some(p) == state.selected_device.as_ref())
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("Select Device")
+                    .to_string();
+
+                egui::ComboBox::from_id_source("device_selector")
+                    .selected_text(selected_text)
+                    .width(250.0)
+                    .show_ui(ui, |ui| {
+                        for (name, path) in &devices {
+                            ui.selectable_value(&mut state.selected_device, Some(path.clone()), name);
+                        }
+                    });
+            }
 
             ui.group(|ui| {
                 ui.label("Configuration");
@@ -122,16 +219,25 @@ impl eframe::App for KeyLockApp {
             ui.add_space(20.0);
 
             if state.status == Status::Idle {
-                if ui.button("🔒 LOCK NOW").clicked() {
-                    state.status = Status::Locked;
-                    let _ = self.command_tx.send(true);
+                if ui.add_enabled(state.selected_device.is_some(), egui::Button::new("🔒 LOCK NOW")).clicked() {
+                    if let Some(path) = state.selected_device.clone() {
+                        state.status = Status::Locked;
+                        state.error_msg = None;
+                        
+                        let (tx, rx) = unbounded::<()>();
+                        self.unlock_tx = Some(tx);
+                        
+                        let thread_state = self.state.clone();
+                        thread::spawn(move || lock_worker(path, rx, thread_state));
+                    }
                 }
             } else {
                 ui.colored_label(egui::Color32::RED, "!!! KEYBOARD LOCKED !!!");
                 ui.label(format!("Press CTRL + {} to unlock", state.unlock_key_name));
                 if ui.button("🔓 CLICK TO UNLOCK").clicked() {
-                    state.status = Status::Idle;
-                    let _ = self.command_tx.send(false);
+                    if let Some(tx) = &self.unlock_tx {
+                        let _ = tx.send(());
+                    }
                 }
             }
         });
@@ -142,10 +248,10 @@ impl eframe::App for KeyLockApp {
 }
 
 fn get_code_from_char(c: char) -> u16 {
-    // Simplified mapping for demonstration
     match c {
-        'Q' => 16, 'W' => 17, 'E' => 18, 'R' => 19, 'T' => 20, 
-        'A' => 30, 'S' => 31, 'D' => 32, 'F' => 33, 'G' => 34,
+        'Q' => 16, 'W' => 17, 'E' => 18, 'R' => 19, 'T' => 20, 'Y' => 21, 'U' => 22, 'I' => 23, 'O' => 24, 'P' => 25,
+        'A' => 30, 'S' => 31, 'D' => 32, 'F' => 33, 'G' => 34, 'H' => 35, 'J' => 36, 'K' => 37, 'L' => 38,
+        'Z' => 44, 'X' => 45, 'C' => 46, 'V' => 47, 'B' => 48, 'N' => 49, 'M' => 50,
         _ => 16,
     }
 }
