@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Keyboard Locker
+Comment=Lock your keyboard input
+Exec=keyboard-locker
+Icon=keyboard-locker
+Terminal=false
+Type=Application
+Categories=Utility;
