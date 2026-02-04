@@ -1,7 +1,7 @@
 # Maintainer: Daryl
 pkgname=keyboard-locker
-pkgver=0.1.1
-pkgrel=3
+pkgver=0.1.5
+pkgrel=1
 pkgdesc="Lock your keyboard input"
 arch=('x86_64')
 url=""
