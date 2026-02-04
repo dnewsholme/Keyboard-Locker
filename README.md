@@ -1,4 +1,5 @@
 # Keyboard Locker
+![header](./resources/header.png)
 
 A simple, effective utility for Linux to lock your keyboard input while keeping your screen visible and the system running.
 
