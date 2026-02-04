@@ -13,7 +13,7 @@ sha256sums=()
 
 build() {
 	cd "$startdir"
-	cargo build --release --locked
+	cargo build --release
 }
 
 package() {

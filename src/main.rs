@@ -136,6 +136,7 @@ fn lock_worker(path: PathBuf, rx: Receiver<()>, state: Arc<Mutex<AppState>>) {
     }
 
     let _ = device.ungrab();
+    state.lock().unwrap().status = Status::Idle;
 }
 
 fn scan_devices() -> Vec<(String, PathBuf)> {
