@@ -167,7 +167,7 @@ impl eframe::App for KeyLockApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Wayland Input Controller");
+            ui.heading("Keyboard Locker");
             ui.add_space(8.0);
 
             if let Some(err) = &state.error_msg {
