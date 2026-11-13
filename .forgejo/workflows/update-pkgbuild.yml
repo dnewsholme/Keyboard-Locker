@@ -1,0 +1,42 @@
+name: Update PKGBUILD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+
+jobs:
+  update-pkgbuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from Cargo.toml
+        id: get_version
+        run: |
+          # Extract version string from Cargo.toml
+          VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+          echo "Detected version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update PKGBUILD
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          if [ -n "$VERSION" ]; then
+            sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
+            sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          fi
+
+      - name: Commit and Push
+        run: |
+          REGISTRY_HOST=$(echo "${{ github.server_url }}" | sed -e 's|^https\?://||')
+          git config user.name "${GITHUB_ACTOR:-forgejo-actions}"
+          git config user.email "${GITHUB_ACTOR:-forgejo-actions}@users.noreply.${REGISTRY_HOST}"
+          git add PKGBUILD
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update PKGBUILD version to ${{ steps.get_version.outputs.version }}"
+            git push
+          fi
+
